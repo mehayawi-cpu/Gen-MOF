@@ -1,0 +1,45 @@
+Extract material synthesis parameters from this PDF article.
+
+CRITICAL INSTRUCTIONS:
+1. If the article describes MULTIPLE materials, return data for EACH material
+2. Use "not_specified" for ANY missing information
+3. For numeric fields, extract ONLY the number (no units, no text)
+4. Your response must be ONLY valid JSON - no explanations, no markdown, no code blocks
+
+RESPONSE FORMAT (return ONLY this structure):
+{
+  "materials": [{
+    "q1_doi": "string",
+    "q2_material_name": "string",
+    "q3_organic_linker_name": "string",
+    "q4_organic_linker_quantity_mg": "number or not_specified",
+    "q5_metal_node_name": "string",
+    "q6_metal_node_quantity_mg": "number or not_specified",
+    "q7_solvent_name": "string",
+    "q8_solvent_quantity_ml": "number or not_specified",
+    "q9_reaction_time_seconds": "number or not_specified",
+    "q10_reaction_temperature_celsius": "number or not_specified",
+    "q11_stirring": "yes or no or not_specified",
+    "q12_total_reaction_time_seconds": "number or not_specified",
+    "q13_stepwise_segmentation": "number or not_specified",
+    "q14_ratio_components": "string",
+    "q15_annealing_time_seconds": "number or not_specified",
+    "q16_annealing_temperature_celsius": "number or not_specified",
+    "q17_pore_size_nm": "number or not_specified",
+    "q18_pore_width_nm": "number or not_specified",
+    "q19_pore_distribution_nm": "string",
+    "q20_breakdown_temperature_celsius": "number or not_specified",
+    "q21_surface_area_m2_per_g": "number or not_specified",
+    "q22_functional_groups": "string",
+    "q23_ph_range_min": "number or not_specified",
+    "q24_ph_range_max": "number or not_specified",
+    "q25_nanocrystalline": "yes or no or not_specified",
+    "q26_amorphous": "yes or no or not_specified",
+    "q27_polar": "yes or no or not_specified",
+    "q28_nonpolar": "yes or no or not_specified",
+    "q29_dimensionality": "1D or 2D or 3D or not_specified",
+    "q30_application": "string"
+  }]
+}
+
+DO NOT include any text before or after the JSON. Return ONLY the JSON object above.
