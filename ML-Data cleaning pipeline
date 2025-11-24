@@ -1,0 +1,395 @@
+Cell 1 – Install & imports
+!pip install rdkit scikit-learn pandas numpy matplotlib -q
+
+import pandas as pd
+import numpy as np
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Lipinski
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+
+from sklearn.metrics import classification_report, confusion_matrix
+
+import matplotlib.pyplot as plt
+Cell 2 – Load the  CSV file
+csv_path = "/content/drive/My Drive/HACATHON/extracted_parameters_v2.csv"
+
+df = pd.read_csv(csv_path)
+print("Raw shape:", df.shape)
+df.head()
+Cell 3 – Clean “not_specified” and convert numeric columns
+# Turn "not_specified" into NaN
+df = df.replace("not_specified", np.nan)
+
+def to_float(x):
+    try:
+        if pd.isna(x):
+            return np.nan
+        return float(str(x).strip())
+    except:
+        return np.nan
+
+numeric_cols = [
+    "Reaction Temperature (°C)",
+    "Reaction Time (h)",
+    "pH",
+    "Yield (%)",
+    "Surface Area (m²/g)",
+    "Pore Volume (cm³/g)",
+    "Pore Size (nm)",
+    "Thermal Decomposition Temp (°C)",
+    "Perf Metric 1 Value",
+    "Inference Confidence (0-1)",
+]
+
+for col in numeric_cols:
+    if col in df.columns:
+        df[col] = df[col].apply(to_float)
+    else:
+        print("Missing numeric column in CSV:", col)
+
+df.head()
+
+Cell 4 – Metal, linker (RDKit), and solvent features
+
+# --- Metal lookup (extend as you discover more) ---
+metal_props = {
+    "Zr": {"Z": 40, "group": 4, "period": 5, "radius_pm": 160},
+    "Al": {"Z": 13, "group": 13, "period": 3, "radius_pm": 135},
+    "Cu": {"Z": 29, "group": 11, "period": 4, "radius_pm": 145},
+    "Zn": {"Z": 30, "group": 12, "period": 4, "radius_pm": 142},
+    "Fe": {"Z": 26, "group": 8, "period": 4, "radius_pm": 156},
+    "Ni": {"Z": 28, "group": 10, "period": 4, "radius_pm": 149},
+    "Co": {"Z": 27, "group": 9, "period": 4, "radius_pm": 152},
+    "Mg": {"Z": 12, "group": 2, "period": 3, "radius_pm": 160},
+    # add more if needed
+}
+
+def add_metal_features(df):
+    Z, G, P, R = [], [], [], []
+    for sym in df["Metal Symbol"]:
+        props = metal_props.get(sym, None) if isinstance(sym, str) else None
+        if props:
+            Z.append(props["Z"])
+            G.append(props["group"])
+            P.append(props["period"])
+            R.append(props["radius_pm"])
+        else:
+            Z.append(np.nan); G.append(np.nan); P.append(np.nan); R.append(np.nan)
+    df["Metal_Z"] = Z
+    df["Metal_group"] = G
+    df["Metal_period"] = P
+    df["Metal_radius_pm"] = R
+    return df
+
+df = add_metal_features(df)
+
+# --- Linker RDKit descriptors from SMILES ---
+def smiles_to_features(smiles):
+    feats = {
+        "Linker_MW": np.nan,
+        "Linker_LogP": np.nan,
+        "Linker_TPSA": np.nan,
+        "Linker_NumAromaticRings": np.nan,
+        "Linker_NumHBD": np.nan,
+        "Linker_NumHBA": np.nan,
+        "Linker_NumRotatableBonds": np.nan,
+    }
+    if not isinstance(smiles, str) or smiles.strip() == "":
+        return feats
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return feats
+
+    feats["Linker_MW"] = Descriptors.MolWt(mol)
+    feats["Linker_LogP"] = Descriptors.MolLogP(mol)
+    feats["Linker_TPSA"] = Descriptors.TPSA(mol)
+    feats["Linker_NumAromaticRings"] = Lipinski.NumAromaticRings(mol)
+    feats["Linker_NumHBD"] = Lipinski.NumHDonors(mol)
+    feats["Linker_NumHBA"] = Lipinski.NumHAcceptors(mol)
+    feats["Linker_NumRotatableBonds"] = Lipinski.NumRotatableBonds(mol)
+    return feats
+
+def add_linker_features(df):
+    smiles_col = None
+    for c in df.columns:
+        if "SMILES" in c or "Smiles" in c:
+            smiles_col = c
+            break
+    if smiles_col is None:
+        print("⚠ No SMILES column found, skipping linker RDKit features.")
+        return df
+
+    feat_series = df[smiles_col].apply(smiles_to_features)
+    feat_df = pd.DataFrame(list(feat_series))
+    df = pd.concat([df, feat_df], axis=1)
+    return df
+
+df = add_linker_features(df)
+
+# --- Solvent flags ---
+def solvent_flags(text):
+    if not isinstance(text, str):
+        text = ""
+    t = text.lower()
+    return pd.Series({
+        "Solvent_has_water": "water" in t or "h2o" in t,
+        "Solvent_has_dmf": "dmf" in t,
+        "Solvent_has_dma": "dma" in t,
+        "Solvent_has_ethanol": "ethanol" in t or "etoh" in t,
+    })
+
+if "Solvent Names" in df.columns:
+    df = pd.concat([df, df["Solvent Names"].apply(solvent_flags)], axis=1)
+else:
+    print("⚠ 'Solvent Names' column not found; solvent flags not added.")
+
+df.head()
+
+Cell 5 – Define feature lists & shared preprocessing
+# Numeric features
+numeric_features = [
+    "Reaction Temperature (°C)", "Reaction Time (h)", "pH", "Yield (%)",
+    "Surface Area (m²/g)", "Pore Volume (cm³/g)", "Pore Size (nm)",
+    "Thermal Decomposition Temp (°C)", "Perf Metric 1 Value",
+    "Inference Confidence (0-1)",
+    "Metal_Z", "Metal_group", "Metal_period", "Metal_radius_pm",
+    "Linker_MW", "Linker_LogP", "Linker_TPSA",
+    "Linker_NumAromaticRings", "Linker_NumHBD", "Linker_NumHBA",
+    "Linker_NumRotatableBonds",
+    "Solvent_has_water", "Solvent_has_dmf",
+    "Solvent_has_dma", "Solvent_has_ethanol",
+]
+numeric_features = [c for c in numeric_features if c in df.columns]
+
+# Categorical features
+categorical_features = [
+    "Metal Symbol",
+    "Linker Name",
+    "Linker Class",
+    "Solvent Class Main",
+    "Pore Size Class",
+    "Dimensionality",
+    "Topology",
+    "Crystallinity",
+    "PXRD Match Quality",
+    "Water Stability",
+    "Thermal Stability Class",
+    "Framework Polarity",
+    "Hydrophilicity Class",
+]
+categorical_features = [c for c in categorical_features if c in df.columns]
+
+print("Numeric features:", numeric_features)
+print("Categorical features:", categorical_features)
+
+# Shared preprocess
+numeric_transformer = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_transformer = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocess_shared = ColumnTransformer([
+    ("num", numeric_transformer, numeric_features),
+    ("cat", categorical_transformer, categorical_features)
+])
+
+MODEL 1 – Application classifier + confusion matrix
+Cell 6 – Train application classifier
+target_app = "Primary Application Category"
+
+if target_app not in df.columns:
+    raise ValueError(f"{target_app} column not found in CSV")
+
+df_app = df[df[target_app].notna()].copy()
+print("Rows with application label:", df_app.shape[0])
+print(df_app[target_app].value_counts())
+
+X_app = df_app[numeric_features + categorical_features]
+y_app = df_app[target_app]
+
+# No stratify: some classes may have only 1 sample
+X_train_app, X_test_app, y_train_app, y_test_app = train_test_split(
+    X_app, y_app, test_size=0.2, random_state=42
+)
+
+clf_app = Pipeline([
+    ("prep", preprocess_shared),
+    ("model", RandomForestClassifier(
+        n_estimators=400,
+        random_state=42,
+        class_weight="balanced"
+    ))
+])
+
+clf_app.fit(X_train_app, y_train_app)
+
+y_pred_app = clf_app.predict(X_test_app)
+
+print("=== Application classifier report ===")
+print(classification_report(y_test_app, y_pred_app))
+print("Classes:", clf_app.named_steps["model"].classes_)
+Cell 7 – Confusion matrix for application classifier
+classes_app = clf_app.named_steps["model"].classes_
+cm_app = confusion_matrix(y_test_app, y_pred_app, labels=classes_app)
+
+plt.figure(figsize=(8, 6))
+plt.imshow(cm_app, interpolation='nearest')
+plt.title("Confusion Matrix – Application Classifier")
+plt.colorbar()
+tick_marks = np.arange(len(classes_app))
+plt.xticks(tick_marks, classes_app, rotation=45, ha="right")
+plt.yticks(tick_marks, classes_app)
+plt.xlabel("Predicted label")
+plt.ylabel("True label")
+
+# Annotate counts
+for i in range(cm_app.shape[0]):
+    for j in range(cm_app.shape[1]):
+        plt.text(j, i, cm_app[i, j],
+                 ha="center", va="center")
+
+plt.tight_layout()
+plt.show()
+
+# Optional: normalized confusion matrix
+cm_app_norm = confusion_matrix(y_test_app, y_pred_app, labels=classes_app, normalize="true")
+
+plt.figure(figsize=(8, 6))
+plt.imshow(cm_app_norm, interpolation='nearest')
+plt.title("Normalized Confusion Matrix – Application Classifier")
+plt.colorbar()
+plt.xticks(tick_marks, classes_app, rotation=45, ha="right")
+plt.yticks(tick_marks, classes_app)
+plt.xlabel("Predicted label")
+plt.ylabel("True label")
+
+for i in range(cm_app_norm.shape[0]):
+    for j in range(cm_app_norm.shape[1]):
+        plt.text(j, i, f"{cm_app_norm[i, j]:.2f}",
+                 ha="center", va="center")
+
+plt.tight_layout()
+plt.show()
+MODEL 2 – Synthesis route classifier + confusion matrix
+Cell 8 – Train synthesis route classifier
+target_route = "Synthesis Route"
+
+if target_route not in df.columns:
+    raise ValueError(f"{target_route} column not found in CSV")
+
+df_route = df[df[target_route].notna()].copy()
+print("Rows with synthesis route label:", df_route.shape[0])
+print(df_route[target_route].value_counts())
+
+# Choose route-focused features (chemistry + solvent + basic structure)
+route_features = [
+    "Metal Symbol", "Metal_Z", "Metal_group", "Metal_period", "Metal_radius_pm",
+    "Linker Name", "Linker Class",
+    "Solvent Class Main",
+    "Solvent_has_water", "Solvent_has_dmf",
+    "Solvent_has_dma", "Solvent_has_ethanol",
+    "Framework Polarity", "Hydrophilicity Class",
+    "Surface Area (m²/g)", "Pore Size (nm)", "Pore Volume (cm³/g)",
+]
+route_features = [c for c in route_features if c in df_route.columns]
+
+X_rt = df_route[route_features]
+y_rt = df_route[target_route]
+
+X_train_rt, X_test_rt, y_train_rt, y_test_rt = train_test_split(
+    X_rt, y_rt, test_size=0.25, random_state=42
+)
+
+# Build route-specific preprocess (in case route_features != full feature set)
+num_cols_rt = [c for c in route_features if c in numeric_features]
+cat_cols_rt = [c for c in route_features if c not in num_cols_rt]
+
+numeric_transformer_rt = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_transformer_rt = Pipeline([
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocess_route = ColumnTransformer([
+    ("num", numeric_transformer_rt, num_cols_rt),
+    ("cat", categorical_transformer_rt, cat_cols_rt),
+])
+
+clf_route = Pipeline([
+    ("prep", preprocess_route),
+    ("model", RandomForestClassifier(
+        n_estimators=400,
+        random_state=42,
+        class_weight="balanced"
+    ))
+])
+
+clf_route.fit(X_train_rt, y_train_rt)
+y_pred_rt = clf_route.predict(X_test_rt)
+
+print("=== Synthesis Route classifier report ===")
+print(classification_report(y_test_rt, y_pred_rt))
+print("Route classes:", clf_route.named_steps["model"].classes_)
+Cell 9 – Confusion matrix for synthesis route classifier
+classes_rt = clf_route.named_steps["model"].classes_
+cm_rt = confusion_matrix(y_test_rt, y_pred_rt, labels=classes_rt)
+
+plt.figure(figsize=(8, 6))
+plt.imshow(cm_rt, interpolation='nearest')
+plt.title("Confusion Matrix – Synthesis Route Classifier")
+plt.colorbar()
+tick_marks_rt = np.arange(len(classes_rt))
+plt.xticks(tick_marks_rt, classes_rt, rotation=45, ha="right")
+plt.yticks(tick_marks_rt, classes_rt)
+plt.xlabel("Predicted label")
+plt.ylabel("True label")
+
+for i in range(cm_rt.shape[0]):
+    for j in range(cm_rt.shape[1]):
+        plt.text(j, i, cm_rt[i, j],
+                 ha="center", va="center")
+
+plt.tight_layout()
+plt.show()
+
+# Optional normalized confusion matrix
+cm_rt_norm = confusion_matrix(y_test_rt, y_pred_rt, labels=classes_rt, normalize="true")
+
+plt.figure(figsize=(8, 6))
+plt.imshow(cm_rt_norm, interpolation='nearest')
+plt.title("Normalized Confusion Matrix – Synthesis Route Classifier")
+plt.colorbar()
+plt.xticks(tick_marks_rt, classes_rt, rotation=45, ha="right")
+plt.yticks(tick_marks_rt, classes_rt)
+plt.xlabel("Predicted label")
+plt.ylabel("True label")
+
+for i in range(cm_rt_norm.shape[0]):
+    for j in range(cm_rt_norm.shape[1]):
+        plt.text(j, i, f"{cm_rt_norm[i, j]:.2f}",
+                 ha="center", va="center")
+
+plt.tight_layout()
+plt.show()
+
+
+
