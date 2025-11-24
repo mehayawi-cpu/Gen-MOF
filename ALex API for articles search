@@ -1,0 +1,122 @@
+!pip install pandas openpyxl requests
+import requests, pandas as pd, math
+
+def search_openalex(keyword, per_page=50, max_results=500):
+    """
+    Search OpenAlex for a keyword and return a list of works (articles).
+    """
+    works = []
+    pages = math.ceil(max_results / per_page)
+    base_url = "https://api.openalex.org/works"
+
+    for page in range(1, pages + 1):
+        params = {
+            "search": keyword,
+            "per-page": per_page,
+            "page": page
+        }
+        r = requests.get(base_url, params=params)
+        r.raise_for_status()
+        data = r.json()
+
+        if "results" not in data or len(data["results"]) == 0:
+            break
+
+        works.extend(data["results"])
+        if len(works) >= max_results:
+            break
+
+    return works[:max_results]
+
+def works_to_df(works):
+    rows = []
+    for w in works:
+        doi = w.get("doi")
+        title = w.get("title")
+        year = w.get("publication_year")
+        journal = (w.get("host_venue") or {}).get("display_name")
+        is_oa = (w.get("open_access") or {}).get("is_oa")
+        oa_url = ((w.get("primary_location") or {}).get("pdf_url")
+                  or (w.get("primary_location") or {}).get("landing_page_url"))
+
+        rows.append({
+            "title": title,
+            "doi": doi,
+            "year": year,
+            "journal": journal,
+            "is_oa": is_oa,
+            "oa_url": oa_url,
+            "openalex_id": w.get("id")
+        })
+    return pd.DataFrame(rows)
+
+# --- user input: your keywords ---
+keywords = ["metal-organic framework water harvesting",
+            "MOF synthesis microwave",
+            "COF crystallinity"]
+
+all_dfs = []
+for kw in keywords:
+    works = search_openalex(kw, max_results=500)  # adjust as needed
+    df_kw = works_to_df(works)
+    df_kw["search_keyword"] = kw
+    all_dfs.append(df_kw)
+
+df_all = pd.concat(all_dfs, ignore_index=True).drop_duplicates(subset=["doi"])
+
+# Save to Excel
+output_path = "/content/articles_metadata.xlsx"
+df_all.to_excel(output_path, index=False)
+output_path
+
+Here is also aonther code to download the articles in PDF format
+import os, time
+import pandas as pd
+import requests
+
+# Load the Excel we just created
+df = pd.read_excel("/content/drive/MyDrive/Hackathon/articles_metadata.xlsx")
+
+save_dir = "/content/drive/MyDrive/Hackathon/papers"
+os.makedirs(save_dir, exist_ok=True)
+
+downloaded = []
+skipped = []
+
+for idx, row in df.iterrows():
+    doi = row.get("doi")
+    is_oa = row.get("is_oa")
+    url = row.get("oa_url")
+
+    if not is_oa or pd.isna(url):
+        skipped.append({"doi": doi, "reason": "not_oa_or_no_url"})
+        continue
+
+    # Build a safe filename
+    doi_str = str(doi) if pd.notna(doi) else f"no_doi_{idx}"
+    base_name = doi_str.replace("/", "_").replace(":", "_").replace(" ", "_")
+    file_path = os.path.join(save_dir, base_name + ".pdf")
+
+    # Skip if already downloaded
+    if os.path.exists(file_path):
+        continue
+
+    try:
+        r = requests.get(url, timeout=30)
+        # crude check: is it a PDF?
+        content_type = r.headers.get("Content-Type", "").lower()
+        if "pdf" not in content_type:
+            skipped.append({"doi": doi, "reason": f"non_pdf({content_type})"})
+            continue
+
+        with open(file_path, "wb") as f:
+            f.write(r.content)
+        downloaded.append({"doi": doi, "file": file_path})
+
+        # be nice to the servers
+        time.sleep(1)
+    except Exception as e:
+        skipped.append({"doi": doi, "reason": str(e)})
+
+len(downloaded), len(skipped)
+
