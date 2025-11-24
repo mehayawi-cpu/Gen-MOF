@@ -1,0 +1,195 @@
+#COF/MOF Parameter Extraction - Google Colab (Single Cell Version)
+# Copy this entire cell into Google Colab and run it!
+# ============================================================================
+# STEP 1: Install and Import
+# ============================================================================
+!pip install anthropic -q
+
+from google.colab import drive
+import anthropic
+import csv
+import base64
+import time
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Any
+# ============================================================================
+# STEP 2: Mount Drive
+# ============================================================================
+drive.mount('/content/drive')
+
+# ============================================================================
+# STEP 3: Configuration (⚠️ MODIFY THESE!)
+# ============================================================================
+
+ANTHROPIC_API_KEY = "My Key"  # ⚠️ REPLACE THIS WITH YOUR KEY!
+PDF_FOLDER = "/content/drive/My Drive/Colab Notebooks/HACATHON/papers"
+OUTPUT_CSV = "/content/drive/My Drive/Colab Notebooks/HACATHON/extracted_parameters.csv"
+LOG_FILE = "/content/drive/My Drive/Colab Notebooks/HACATHON/extraction_log.json"
+MODEL = "claude-sonnet-4-20250514"
+
+# ============================================================================
+# STEP 4: Verify Setup
+# ============================================================================
+
+pdf_folder = Path(PDF_FOLDER)
+if not pdf_folder.exists():
+    raise FileNotFoundError(f"Folder not found: {PDF_FOLDER}")
+
+pdf_files = sorted(list(pdf_folder.glob("*.pdf")))
+print(f"✅ Found {len(pdf_files)} PDF files")
+print(f"📊 Output will be saved to: {OUTPUT_CSV}\n")
+
+# ============================================================================
+# STEP 5: Define Extraction Components
+# ============================================================================
+
+CSV_HEADERS = [
+    "Article DOI", "Material Name", "Organic Linker Name",
+    "Organic Linker Quantity (mg)", "Metal/Node Name", "Metal/Node Quantity (mg)",
+    "Solvent Name", "Solvent Quantity (ml)", "Reaction Time (seconds)",
+    "Reaction Temperature (°C)", "Stirring (yes/no)", "Total Reaction Time (seconds)",
+    "Stepwise Segmentation (steps)", "Ratio A/B/C", "Annealing Time (seconds)",
+    "Annealing Temperature (°C)", "Pore Size (nm)", "Pore Width (nm)",
+    "Pore Distribution (nm)", "Breakdown Temperature (°C)", "Surface Area (m²/g)",
+    "Functional Groups", "pH Range Min", "pH Range Max", "Nanocrystalline (yes/no)",
+    "Amorphous (yes/no)", "Polar (yes/no)", "Non-Polar (yes/no)",
+    "Dimensionality (1D/2D/3D)", "Application"
+]
+
+EXTRACTION_PROMPT = """Extract material synthesis parameters from this PDF article.
+
+CRITICAL: If the article describes MULTIPLE materials, return data for EACH material.
+Use "not_specified" for missing information.
+For numeric fields, extract ONLY the number (no units).
+
+Return as JSON:
+{
+  "materials": [{
+    "q1_doi": "DOI", "q2_material_name": "Name", "q3_organic_linker_name": "Name",
+    "q4_organic_linker_quantity_mg": "number", "q5_metal_node_name": "Name",
+    "q6_metal_node_quantity_mg": "number", "q7_solvent_name": "Name",
+    "q8_solvent_quantity_ml": "number", "q9_reaction_time_seconds": "number",
+    "q10_reaction_temperature_celsius": "number", "q11_stirring": "yes/no",
+    "q12_total_reaction_time_seconds": "number", "q13_stepwise_segmentation": "number",
+    "q14_ratio_components": "ratio", "q15_annealing_time_seconds": "number",
+    "q16_annealing_temperature_celsius": "number", "q17_pore_size_nm": "number",
+    "q18_pore_width_nm": "number", "q19_pore_distribution_nm": "range",
+    "q20_breakdown_temperature_celsius": "number", "q21_surface_area_m2_per_g": "number",
+    "q22_functional_groups": "list", "q23_ph_range_min": "number",
+    "q24_ph_range_max": "number", "q25_nanocrystalline": "yes/no",
+    "q26_amorphous": "yes/no", "q27_polar": "yes/no", "q28_nonpolar": "yes/no",
+    "q29_dimensionality": "1D/2D/3D", "q30_application": "text"
+  }]
+}
+Return ONLY valid JSON."""
+
+def material_to_csv_row(material):
+    return [
+        material.get(f'q{i}_{key}', 'not_specified')
+        if i <= 2 else str(material.get(f'q{i}_{key}', 'not_specified'))
+        for i, key in enumerate([
+            'doi', 'material_name', 'organic_linker_name', 'organic_linker_quantity_mg',
+            'metal_node_name', 'metal_node_quantity_mg', 'solvent_name', 'solvent_quantity_ml',
+            'reaction_time_seconds', 'reaction_temperature_celsius', 'stirring',
+            'total_reaction_time_seconds', 'stepwise_segmentation', 'ratio_components',
+            'annealing_time_seconds', 'annealing_temperature_celsius', 'pore_size_nm',
+            'pore_width_nm', 'pore_distribution_nm', 'breakdown_temperature_celsius',
+            'surface_area_m2_per_g', 'functional_groups', 'ph_range_min', 'ph_range_max',
+            'nanocrystalline', 'amorphous', 'polar', 'nonpolar', 'dimensionality', 'application'
+        ], 1)
+    ]
+
+# ============================================================================
+# STEP 6: Main Extraction
+# ============================================================================
+
+if ANTHROPIC_API_KEY == "your-api-key-here":
+    raise ValueError("⚠️ Please set your Anthropic API key above!")
+
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+extraction_log = []
+total_materials = 0
+
+print("🚀 Starting extraction...\n")
+
+with open(OUTPUT_CSV, 'w', newline='', encoding='utf-8') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(CSV_HEADERS)
+
+    for i, pdf_path in enumerate(pdf_files, 1):
+        print(f"[{i}/{len(pdf_files)}] {pdf_path.name}... ", end="", flush=True)
+
+        try:
+            # Read and encode PDF
+            with open(pdf_path, 'rb') as f:
+                pdf_base64 = base64.standard_b64encode(f.read()).decode('utf-8')
+
+            # Call Claude API
+            message = client.messages.create(
+                model=MODEL,
+                max_tokens=4000,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "document", "source": {"type": "base64",
+                         "media_type": "application/pdf", "data": pdf_base64}},
+                        {"type": "text", "text": EXTRACTION_PROMPT}
+                    ]
+                }]
+            )
+
+            # Parse response
+            response_text = message.content[0].text
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            data = json.loads(response_text[json_start:json_end])
+            materials = data.get('materials', [])
+
+            # Write to CSV
+            for material in materials:
+                writer.writerow(material_to_csv_row(material))
+
+            total_materials += len(materials)
+            print(f"✅ {len(materials)} material(s)")
+
+            extraction_log.append({
+                "file": pdf_path.name,
+                "status": "success",
+                "materials_found": len(materials),
+                "timestamp": datetime.now().isoformat()
+            })
+
+        except Exception as e:
+            print(f"❌ Error: {str(e)}")
+            extraction_log.append({
+                "file": pdf_path.name,
+                "status": "error",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            })
+
+        time.sleep(1)  # Rate limiting
+
+# Save log
+with open(LOG_FILE, 'w') as f:
+    json.dump(extraction_log, f, indent=2)
+
+# ============================================================================
+# STEP 7: Summary
+# ============================================================================
+
+success = len([x for x in extraction_log if x['status'] == 'success'])
+errors = len([x for x in extraction_log if x['status'] == 'error'])
+
+print("\n" + "="*60)
+print("✅ EXTRACTION COMPLETE!")
+print("="*60)
+print(f"📁 Output CSV: {OUTPUT_CSV}")
+print(f"📝 Log file: {LOG_FILE}")
+print(f"\n📊 SUMMARY:")
+print(f"   Articles processed: {len(pdf_files)}")
+print(f"   ✅ Successful: {success}")
+print(f"   ❌ Errors: {errors}")
+print(f"   📦 Total materials: {total_materials}")
+print(f"\n💡 Open the CSV file in Google Sheets to view results!")
